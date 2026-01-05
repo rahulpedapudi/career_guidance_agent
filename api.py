@@ -43,6 +43,10 @@ skill_snapshots: dict[str, SkillSnapshot] = {}
 horizon_outputs: dict[str, HorizonOutput] = {}
 pipeline = CareerGuidancePipeline()
 
+# Chat agent for conversational AI
+from career_agent.chat_agent import ChatAgent
+chat_agent = ChatAgent()
+
 
 # ============================================================================
 # Request Models (DEV_MODE: user_id in body)
@@ -328,3 +332,54 @@ async def get_skills(user_id: str):
     if user_id not in skill_snapshots:
         raise HTTPException(status_code=404, detail="Skills not found.")
     return skill_snapshots[user_id]
+
+
+# ============================================================================
+# Chat Endpoint
+# ============================================================================
+
+class ChatRequest(BaseModel):
+    user_id: str
+    message: str
+    session_id: str | None = None
+
+
+class ChatResponse(BaseModel):
+    response: str
+    suggestions: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Conversational career guidance chat.
+    
+    Uses the user's HorizonOutput as context for personalized responses.
+    Supports multi-turn conversations via session_id.
+    """
+    if request.user_id not in horizon_outputs:
+        raise HTTPException(
+            status_code=404, 
+            detail="Complete onboarding first to use chat."
+        )
+    
+    horizon = horizon_outputs[request.user_id]
+    
+    try:
+        result = chat_agent.chat(
+            message=request.message,
+            horizon=horizon,
+            session_id=request.session_id,
+        )
+        return ChatResponse(**result)
+    except Exception as e:
+        print(f"❌ Chat Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/chat/session/{session_id}")
+async def clear_chat_session(session_id: str):
+    """Clear conversation history for a session."""
+    chat_agent.clear_session(session_id)
+    return {"status": "ok", "message": f"Session {session_id} cleared"}
+
