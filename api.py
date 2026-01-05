@@ -23,7 +23,7 @@ from career_agent.models import (
     TimeCommitment,
 )
 from career_agent.agent import CareerGuidancePipeline
-
+from career_agent.database import db
 
 # ============================================================================
 # Configuration
@@ -113,19 +113,26 @@ class HealthResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Connect to DB
+    await db.connect()
+    
     if DEV_MODE:
         print("⚠️  DEV_MODE enabled - Auth is BYPASSED")
     else:
         print("🔒 Production mode - Google OAuth required")
     print("🚀 Career Guidance API starting...")
+    
     yield
+    
+    # Close DB connection
+    await db.close()
     print("👋 Career Guidance API shutting down...")
 
 
 app = FastAPI(
     title="Career Guidance Agent API",
     description="Multi-agent career reasoning pipeline",
-    version="2.2.0",
+    version="2.3.0",
     lifespan=lifespan,
 )
 
@@ -366,10 +373,11 @@ async def chat(request: ChatRequest):
     horizon = horizon_outputs[request.user_id]
     
     try:
-        result = chat_agent.chat(
+        result = await chat_agent.chat(
             message=request.message,
             horizon=horizon,
             session_id=request.session_id,
+            user_id=request.user_id,
         )
         return ChatResponse(**result)
     except Exception as e:
@@ -380,6 +388,5 @@ async def chat(request: ChatRequest):
 @app.delete("/api/chat/session/{session_id}")
 async def clear_chat_session(session_id: str):
     """Clear conversation history for a session."""
-    chat_agent.clear_session(session_id)
+    await chat_agent.clear_session(session_id)
     return {"status": "ok", "message": f"Session {session_id} cleared"}
-

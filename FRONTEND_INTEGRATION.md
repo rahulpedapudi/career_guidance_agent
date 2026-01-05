@@ -14,10 +14,11 @@ http://localhost:8000
 >
 > If no `GOOGLE_API_KEY` is configured in the environment, the system gracefully falls back to rule-based analysis.
 
-The backend consists of 4 specialized agents:
+The backend consists of 5 specialized agents:
 | Agent | Purpose | LLM |
 |-------|---------|-----|
 | **ProfileAgent** | Analyzes user profile, infers role & level | ✅ Gemini 2.5 Flash |
+| **ChatAgent** | Contextual career guidance chatbot | ✅ Gemini 2.5 Flash |
 | **SkillAgent** | Identifies skill gaps & dependencies | ❌ Rule-based |
 | **CareerAgent** | Recommends career directions | ❌ Rule-based |
 | **ReasoningAgent** | Synthesizes final HorizonOutput | ❌ Rule-based |
@@ -40,6 +41,60 @@ GET /health
   "message": "Career Guidance API is running",
   "dev_mode": true
 }
+```
+
+---
+
+### 2. Career Chat (New) 💬
+
+Conversational guidance API that uses the user's `HorizonOutput` as context.
+
+```http
+POST /api/chat
+Content-Type: application/json
+```
+
+**Request Body:**
+
+```typescript
+interface ChatRequest {
+  user_id: string; // Must match onboarded user
+  message: string; // User's question
+  session_id?: string; // Optional: Enables conversation history
+}
+```
+
+**Response:**
+
+```typescript
+interface ChatResponse {
+  response: string; // Markdown formatted answer
+  suggestions: string[]; // 3 quick follow-up questions
+}
+```
+
+**Example Usage:**
+
+```javascript
+// 1. Start a chat
+const response = await fetch("http://localhost:8000/api/chat", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    user_id: "user_123",
+    message: "What skill should I focus on first?",
+    session_id: "session_abc", // Keep consistent for same conversation
+  }),
+});
+const { response: answer, suggestions } = await response.json();
+```
+
+### 3. Clear Chat Session
+
+Reset conversation history for a session.
+
+```http
+DELETE /api/chat/session/{session_id}
 ```
 
 ---

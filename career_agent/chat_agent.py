@@ -105,9 +105,21 @@ class ChatAgent:
     Uses the user's HorizonOutput as context for personalized responses.
     """
     
+import datetime
+from career_agent.database import db
+
+# ... imports ...
+
+class ChatAgent:
+    """
+    Conversational agent for career guidance.
+    
+    Uses the user's HorizonOutput as context for personalized responses.
+    """
+    
     def __init__(self):
         self.model = None
-        self.conversations: dict[str, list] = {}  # session_id -> history
+        # self.conversations removed in favor of MongoDB
         
         if GEMINI_AVAILABLE and API_KEY:
             try:
@@ -122,23 +134,17 @@ class ChatAgent:
                 print(f"⚠️ ChatAgent: Failed to init model: {e}")
                 self.model = None
     
-    def chat(
+    async def chat(
         self,
         message: str,
         horizon: HorizonOutput,
         session_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict:
         """
         Generate a response to the user's message.
-        
-        Args:
-            message: User's question or message
-            horizon: User's HorizonOutput for context
-            session_id: Optional session ID for multi-turn conversations
-        
-        Returns:
-            dict with 'response' and optional 'suggestions'
         """
+        # Fallback if no model
         if not self.model:
             return self._fallback_response(message, horizon)
         
@@ -146,8 +152,15 @@ class ChatAgent:
             # Build context
             context = build_context_from_horizon(horizon)
             
-            # Get conversation history
-            history = self.conversations.get(session_id, []) if session_id else []
+            # Get conversation history from DB
+            history = []
+            if session_id and user_id:
+                coll = db.get_collection("conversations")
+                if coll is not None:
+                    # Find existing session
+                    doc = await coll.find_one({"session_id": session_id, "user_id": user_id})
+                    if doc:
+                        history = doc.get("messages", [])
             
             # Build the full prompt
             full_prompt = f"{SYSTEM_PROMPT}\n\n{context}\n\n"
@@ -155,24 +168,38 @@ class ChatAgent:
             # Add history
             if history:
                 full_prompt += "CONVERSATION HISTORY:\n"
-                for turn in history[-6:]:  # Last 3 exchanges
-                    full_prompt += f"User: {turn['user']}\nAssistant: {turn['assistant']}\n"
+                for turn in history[-6:]:  # Last 3 exchanges (6 messages)
+                    role = turn.get("role", "unknown")
+                    content = turn.get("content", "")
+                    if role == "user":
+                        full_prompt += f"User: {content}\n"
+                    elif role == "assistant":
+                        full_prompt += f"Assistant: {content}\n"
                 full_prompt += "\n"
             
             full_prompt += f"User: {message}\nAssistant:"
             
             # Generate response
-            response = self.model.generate_content(full_prompt)
+            response = await self.model.generate_content_async(full_prompt)
             assistant_message = response.text.strip()
             
-            # Update history
-            if session_id:
-                if session_id not in self.conversations:
-                    self.conversations[session_id] = []
-                self.conversations[session_id].append({
-                    "user": message,
-                    "assistant": assistant_message,
-                })
+            # Persist to DB
+            if session_id and user_id:
+                coll = db.get_collection("conversations")
+                if coll is not None:
+                    new_messages = [
+                        {"role": "user", "content": message, "timestamp": datetime.datetime.utcnow()},
+                        {"role": "assistant", "content": assistant_message, "timestamp": datetime.datetime.utcnow()}
+                    ]
+                    
+                    await coll.update_one(
+                        {"session_id": session_id, "user_id": user_id},
+                        {
+                            "$push": {"messages": {"$each": new_messages}},
+                            "$setOnInsert": {"created_at": datetime.datetime.utcnow()}
+                        },
+                        upsert=True
+                    )
             
             # Generate suggestions based on context
             suggestions = self._generate_suggestions(message, horizon)
@@ -240,7 +267,9 @@ class ChatAgent:
         
         return suggestions[:3]  # Max 3 suggestions
     
-    def clear_session(self, session_id: str):
+    async def clear_session(self, session_id: str):
         """Clear conversation history for a session."""
-        if session_id in self.conversations:
-            del self.conversations[session_id]
+        coll = db.get_collection("conversations")
+        if coll is not None:
+            await coll.delete_one({"session_id": session_id})
+
