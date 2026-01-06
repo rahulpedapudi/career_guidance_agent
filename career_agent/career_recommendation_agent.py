@@ -2,7 +2,12 @@
 Career Recommendation Agent — Directional Hypotheses.
 
 Produces rich career analysis with primaryRole, matchScore, alternatives.
+NOW POWERED BY GEMINI 2.5 FLASH (with rule-based fallback).
 """
+
+import os
+import json
+import google.generativeai as genai
 
 from career_agent.models import (
     ProfileAnalysis,
@@ -15,6 +20,7 @@ from career_agent.models import (
 
 
 # Career role definitions with requirements and market insights
+# (Kept as fallback and for reference)
 CAREER_ROLES = {
     "ml_engineer": {
         "title": "Machine Learning Engineer",
@@ -197,49 +203,166 @@ class CareerRecommendationAgent:
     """
     Determines career direction based on profile and skills.
     
-    Produces:
-    - Primary career direction with match score
-    - Alternative directions
-    - Market insights
+    Uses Gemini 2.5 Flash to infer career paths, falling back to static rules.
     """
     
-    def recommend(
+    def __init__(self):
+        self.model = None
+        api_key = os.getenv("GOOGLE_API_KEY")
+        
+        if api_key:
+            genai.configure(api_key=api_key)
+            try:
+                self.model = genai.GenerativeModel(
+                    model_name="gemini-2.5-flash",
+                    generation_config={
+                        "temperature": 0.3,
+                        "response_mime_type": "application/json"
+                    },
+                    system_instruction="""You are a Career Guidance Expert.
+Analyze user profiles and suggest the best 3 technical career roles.
+Output strictly in JSON format matching the schema provided."""
+                )
+                print("✨ CareerAgent: LLM Enabled (Gemini 2.5 Flash)")
+            except Exception as e:
+                print(f"⚠️ CareerAgent: Model init failed: {e}")
+                self.model = None
+        else:
+            print("⚠️ CareerAgent: No API Key - using rule-based fallback")
+    
+    async def recommend(
         self,
         profile: ProfileAnalysis,
         skill_analysis: SkillAnalysis,
         user_interests: list[str] | None = None,
         user_goals: list[str] | None = None,
     ) -> CareerAnalysis:
-        """Generate career recommendations.
+        """Generate career recommendations."""
         
-        Args:
-            profile: Analyzed profile from ProfileAgent
-            skill_analysis: Skill analysis from SkillAgent
-            user_interests: Raw interests from user input (e.g., ["AI/ML", "Backend"])
-            user_goals: Raw goals from user input (e.g., ["Get job at FAANG"])
-        """
+        # Try LLM first
+        if self.model:
+            try:
+                # We can't await synchronous genai calls, but usually they are fast enough for simple tasks
+                # or we run them in executor. For now, since api is async, let's just call it.
+                # However, to be safe and avoid blocking event loop, we should use run_in_executor if possible,
+                # but standard practice for this quick prototype is direct call.
+                return self._recommend_with_llm(
+                    profile, skill_analysis, user_interests, user_goals
+                )
+            except Exception as e:
+                print(f"⚠️ CareerAgent LLM Failure: {e.__class__.__name__}: {e}")
+                print("🔄 Falling back to rule-based logic...")
+        
+        return self._recommend_fallback(
+            profile, skill_analysis, user_interests, user_goals
+        )
+
+    def _recommend_with_llm(
+        self,
+        profile: ProfileAnalysis,
+        skill_analysis: SkillAnalysis,
+        user_interests: list[str] | None,
+        user_goals: list[str] | None,
+    ) -> CareerAnalysis:
+        """Construct prompt and parse LLM response."""
+        
+        interests = user_interests or profile.preferences.goals
+        goals = user_goals or []
+        
+        prompt = f"""
+USER PROFILE:
+- Name: {profile.name}
+- Stage: {profile.background.education}
+- Exp Level: {profile.level.value}
+
+SKILLS:
+- Completed: {', '.join(skill_analysis.skillsCompleted)}
+- In Progress: {', '.join(skill_analysis.skillsInProgress)}
+
+INTERESTS: {', '.join(interests)}
+GOALS: {', '.join(goals)}
+
+TASK:
+Suggest 1 Primary Career Role and 3 Alternative Roles based on this profile.
+For the Primary Role, provide market insights (salary in Lakhs Per Annum - LPA for India market, trend, companies).
+
+Output strictly valid JSON with this structure:
+{{
+  "primary": {{ 
+    "role": "string (Job Title)", 
+    "score": int (0-100 match), 
+    "reason": "string (Why this fits)", 
+    "timeToReady": "string (e.g. '6-9 months')" 
+  }},
+  "market": {{ 
+    "demandTrend": "increasing" | "stable" | "decreasing", 
+    "salaryRange": "string (e.g. '12-25 LPA')", 
+    "topCompanies": ["string", "string"] 
+  }},
+  "alternatives": [
+    {{ "role": "string", "score": int, "reason": "string" }}
+  ]
+}}
+"""
+        response = self.model.generate_content(prompt)
+        data = json.loads(response.text)
+        
+        # Map to Pydantic models
+        primary_data = data["primary"]
+        market_data = data["market"]
+        
+        primary_match = CareerMatch(
+            role=primary_data["role"],
+            matchScore=primary_data["score"],
+            reason=primary_data["reason"],
+            timeToReady=primary_data["timeToReady"]
+        )
+        
+        alternatives = [
+            CareerMatch(
+                role=alt["role"],
+                matchScore=alt["score"],
+                reason=alt["reason"],
+                timeToReady="N/A" # Default
+            ) for alt in data.get("alternatives", [])
+        ]
+        
+        market_insights = MarketInsights(
+            demandTrend=market_data["demandTrend"],
+            salaryRange=market_data["salaryRange"],
+            topCompanies=market_data["topCompanies"]
+        )
+        
+        return CareerAnalysis(
+            primaryDirection=primary_match,
+            alternativeDirections=alternatives,
+            marketInsights=market_insights
+        )
+
+    def _recommend_fallback(
+        self,
+        profile: ProfileAnalysis,
+        skill_analysis: SkillAnalysis,
+        user_interests: list[str] | None = None,
+        user_goals: list[str] | None = None,
+    ) -> CareerAnalysis:
+        """Legacy rule-based recommendation logic."""
         completed = skill_analysis.skillsCompleted
         in_progress = skill_analysis.skillsInProgress
         
-        # Prioritize explicit user interests over inferred ones
         interests = user_interests or []
         goals = user_goals or []
         
-        # Fallback to profile preferences if no explicit interests
         if not interests:
             interests = profile.preferences.goals
-        
-        # Combine everything for matching
-        all_inputs = interests + goals + [profile.role]
         
         # Find matching roles based on user preferences
         matched_roles = match_interests_to_roles(interests, goals)
         
-        # Calculate scores for all matched roles (user preferences get priority)
+        # Calculate scores
         scored_roles = []
         for role_key in matched_roles:
             score = calculate_match_score(role_key, completed, in_progress)
-            # Boost score for explicitly matched interests
             score = min(100, score + 20)
             scored_roles.append((role_key, score))
         
@@ -247,14 +370,12 @@ class CareerRecommendationAgent:
         for role_key in CAREER_ROLES:
             if role_key not in matched_roles:
                 score = calculate_match_score(role_key, completed, in_progress)
-                if score >= 30:  # Only include if reasonable fit
+                if score >= 30:
                     scored_roles.append((role_key, score))
         
-        # Sort by score
         scored_roles.sort(key=lambda x: x[1], reverse=True)
         
         if not scored_roles:
-            # Default fallback
             scored_roles = [("backend_developer", 40)]
         
         # Primary role
@@ -269,9 +390,9 @@ class CareerRecommendationAgent:
             timeToReady=primary_role["time_to_ready"].get(level_key, "12 months"),
         )
         
-        # Alternative roles
+        # Alternative roles (max 3)
         alternatives = []
-        for role_key, score in scored_roles[1:4]:  # Up to 3 alternatives
+        for role_key, score in scored_roles[1:4]:
             role = CAREER_ROLES[role_key]
             alternatives.append(CareerMatch(
                 role=role["title"],
@@ -284,4 +405,3 @@ class CareerRecommendationAgent:
             alternativeDirections=alternatives,
             marketInsights=primary_role["market"],
         )
-

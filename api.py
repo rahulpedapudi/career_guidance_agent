@@ -205,6 +205,43 @@ def parse_exposure(value: str) -> ExposureLevel:
 
 
 # ============================================================================
+# Persistence Helpers
+# ============================================================================
+
+async def load_user_data(user_id: str):
+    """Load user data from MongoDB if not in memory."""
+    if user_id in user_profiles:
+        return
+
+    # Try loading from DB
+    profiles_coll = db.get_collection("profiles")
+    skills_coll = db.get_collection("skills")
+    horizon_coll = db.get_collection("horizons")
+    
+    if profiles_coll is not None:
+        p_data = await profiles_coll.find_one({"user_id": user_id})
+        if p_data:
+            # Remove _id
+            if "_id" in p_data: del p_data["_id"]
+            user_profiles[user_id] = UserProfileInput(**p_data)
+            print(f"✨ Loaded profile for {user_id} from DB")
+            
+    if skills_coll is not None:
+        s_data = await skills_coll.find_one({"user_id": user_id})
+        if s_data:
+            if "_id" in s_data: del s_data["_id"]
+            skill_snapshots[user_id] = SkillSnapshot(**s_data)
+            print(f"✨ Loaded skills for {user_id} from DB")
+            
+    if horizon_coll is not None:
+        h_data = await horizon_coll.find_one({"userId": user_id})
+        if h_data:
+            if "_id" in h_data: del h_data["_id"]
+            horizon_outputs[user_id] = HorizonOutput(**h_data)
+            print(f"✨ Loaded horizon for {user_id} from DB")
+
+
+# ============================================================================
 # Endpoints (No auth in DEV_MODE)
 # ============================================================================
 
@@ -253,17 +290,44 @@ async def onboard_user(request: OnboardingRequest):
         
         user_profiles[user_id] = profile
         
+        # Save profile to DB
+        profiles_coll = db.get_collection("profiles")
+        if profiles_coll is not None:
+            await profiles_coll.replace_one(
+                {"user_id": user_id}, 
+                profile.model_dump(), 
+                upsert=True
+            )
+        
         if user_id not in skill_snapshots:
             skill_snapshots[user_id] = SkillSnapshot(skills=[])
+            # Save default skills to DB
+            skills_coll = db.get_collection("skills")
+            if skills_coll is not None:
+                await skills_coll.replace_one(
+                    {"user_id": user_id},
+                    {"user_id": user_id, "skills": []},
+                    upsert=True
+                )
         
         event = Event(event_type=EventType.ONBOARDING_COMPLETED)
         
-        result = pipeline.process_event(
+        result = await pipeline.process_event(
             event=event,
             user_profile=profile,
             skill_snapshot=skill_snapshots[user_id],
         )
         horizon_outputs[user_id] = result
+        
+        # Save horizon to DB
+        horizon_coll = db.get_collection("horizons")
+        if horizon_coll is not None:
+            await horizon_coll.replace_one(
+                {"userId": user_id},
+                result.model_dump(),
+                upsert=True
+            )
+            
         print(f"✅ Horizon Output for {user_id}:\n{result.model_dump_json(indent=2)}")
         return result
         
@@ -275,21 +339,42 @@ async def onboard_user(request: OnboardingRequest):
 @app.post("/api/skills", response_model=HorizonOutput)
 async def update_skills(request: SkillUpdateRequest):
     """Update user's skill snapshot."""
+    await load_user_data(request.user_id)
+    
     if request.user_id not in user_profiles:
         raise HTTPException(status_code=404, detail="Complete onboarding first.")
     
     snapshot = SkillSnapshot(skills=request.skills)
     skill_snapshots[request.user_id] = snapshot
     
+    # Save skills to DB
+    skills_coll = db.get_collection("skills")
+    if skills_coll is not None:
+        await skills_coll.replace_one(
+            {"user_id": request.user_id},
+            snapshot.model_dump(),
+            upsert=True
+        )
+    
     event = Event(event_type=EventType.SKILL_UPDATED)
     
     try:
-        result = pipeline.process_event(
+        result = await pipeline.process_event(
             event=event,
             user_profile=user_profiles[request.user_id],
             skill_snapshot=snapshot,
         )
         horizon_outputs[request.user_id] = result
+        
+        # Save horizon to DB
+        horizon_coll = db.get_collection("horizons")
+        if horizon_coll is not None:
+            await horizon_coll.replace_one(
+                {"userId": request.user_id},
+                result.model_dump(),
+                upsert=True
+            )
+            
         print(f"✅ Horizon Output for {request.user_id}:\n{result.model_dump_json(indent=2)}")
         return result
     except Exception as e:
@@ -299,18 +384,30 @@ async def update_skills(request: SkillUpdateRequest):
 @app.post("/api/events", response_model=HorizonOutput)
 async def trigger_event(request: EventRequest):
     """Trigger a generic event."""
+    await load_user_data(request.user_id)
+    
     if request.user_id not in user_profiles:
         raise HTTPException(status_code=404, detail="Complete onboarding first.")
     
     event = Event(event_type=request.event_type, payload=request.payload)
     
     try:
-        result = pipeline.process_event(
+        result = await pipeline.process_event(
             event=event,
             user_profile=user_profiles[request.user_id],
             skill_snapshot=skill_snapshots.get(request.user_id, SkillSnapshot(skills=[])),
         )
         horizon_outputs[request.user_id] = result
+        
+        # Save horizon to DB
+        horizon_coll = db.get_collection("horizons")
+        if horizon_coll is not None:
+            await horizon_coll.replace_one(
+                {"userId": request.user_id},
+                result.model_dump(),
+                upsert=True
+            )
+
         print(f"✅ Horizon Output for {request.user_id}:\n{result.model_dump_json(indent=2)}")
         return result
     except Exception as e:
@@ -320,6 +417,8 @@ async def trigger_event(request: EventRequest):
 @app.get("/api/horizon/{user_id}", response_model=HorizonOutput)
 async def get_horizon(user_id: str):
     """Get cached HorizonOutput for a user."""
+    await load_user_data(user_id)
+    
     if user_id not in horizon_outputs:
         raise HTTPException(status_code=404, detail="Complete onboarding first.")
     return horizon_outputs[user_id]
@@ -328,6 +427,8 @@ async def get_horizon(user_id: str):
 @app.get("/api/profile/{user_id}", response_model=UserProfileInput)
 async def get_profile(user_id: str):
     """Get user's profile."""
+    await load_user_data(user_id)
+    
     if user_id not in user_profiles:
         raise HTTPException(status_code=404, detail="User not found.")
     return user_profiles[user_id]
@@ -336,6 +437,8 @@ async def get_profile(user_id: str):
 @app.get("/api/skills/{user_id}", response_model=SkillSnapshot)
 async def get_skills(user_id: str):
     """Get user's skill snapshot."""
+    await load_user_data(user_id)
+    
     if user_id not in skill_snapshots:
         raise HTTPException(status_code=404, detail="Skills not found.")
     return skill_snapshots[user_id]

@@ -132,6 +132,8 @@ def _role_to_interest(role: str) -> str:
         return "Full Stack Development"
     if "devops" in role.lower():
         return "Cloud & DevOps"
+    if any(k in role.lower() for k in ["blockchain", "smart contract", "dapp", "web3", "crypto"]):
+        return "Blockchain & Web3"
     return "Software Development"
 
 
@@ -189,7 +191,8 @@ def build_active_interests(career: CareerAnalysis, roadmap: Roadmap | None = Non
         interests.append(ActiveInterest(
             id=alt.role.lower().replace(" ", "-"),
             title=_role_to_interest(alt.role),
-            progress=max(10, alt.matchScore // 2),
+
+            progress=0,
             status="Planned",
             color=_get_interest_color(alt.role),
             modulesRemaining=4,  # Placeholder for alternates

@@ -43,7 +43,7 @@ class CareerGuidancePipeline:
         self._skill_cache: dict[str, SkillAnalysis] = {}
         self._career_cache: dict[str, CareerAnalysis] = {}
     
-    def process_event(
+    async def process_event(
         self,
         event: Event,
         user_profile: UserProfileInput,
@@ -101,7 +101,7 @@ class CareerGuidancePipeline:
                     )
                 
                 # Pass user's explicit interests and goals for priority matching
-                career_result = self.career_agent.recommend(
+                career_result = await self.career_agent.recommend(
                     profile=profile_result,
                     skill_analysis=skill_result,
                     user_interests=user_profile.interests,
@@ -131,7 +131,7 @@ class CareerGuidancePipeline:
                     self._skill_cache[user_id] = skill_result
                 
                 if not career_result:
-                    career_result = self.career_agent.recommend(
+                    career_result = await self.career_agent.recommend(
                         profile=profile_result,
                         skill_analysis=skill_result,
                         user_interests=user_profile.interests,
@@ -155,7 +155,7 @@ class CareerGuidancePipeline:
             raise
 
 
-def run_pipeline(
+async def run_pipeline(
     event_type: EventType,
     user_profile: UserProfileInput,
     skill_snapshot: SkillSnapshot | None = None,
@@ -164,4 +164,4 @@ def run_pipeline(
     """Run the career guidance pipeline for an event."""
     pipeline = CareerGuidancePipeline()
     event = Event(event_type=event_type, payload=payload or {})
-    return pipeline.process_event(event, user_profile, skill_snapshot)
+    return await pipeline.process_event(event, user_profile, skill_snapshot)
